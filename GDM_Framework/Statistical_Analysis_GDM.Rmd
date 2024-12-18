@@ -1,0 +1,750 @@
+---
+title: "Analysis GDM PSO&GAs"
+author: "Miguel Benito Parejo"
+date: "2024-05-04"
+output: html_document
+---
+
+```{r}
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(car)
+library(nortest)
+library(jsonlite)
+```
+
+# PSO
+
+```{r loading data}
+#PSOs6 <- read_excel("files/Results/PSOs.xlsx")
+#Gen6_5 <- read_excel("files/Results/GAs/6 5.xlsx")
+
+PSOs <- read_excel("files/Results/PSOs.xlsx")
+directory_path <- "files/Results/GAs"
+
+files <- list.files(directory_path, pattern = "\\.xlsx$", full.names = TRUE);
+
+data_list <- lapply(files, function(file) {
+  data <- read_excel(file)
+  return(data)
+})
+
+Gens <- bind_rows(data_list)
+
+```
+
+## Hypervolume study
+
+We start studying the homoscedasticity and normality of the HVs for each configuration.
+
+```{r}
+# First we set an ID for each configuration
+
+Master_Configurations <- PSOs %>% 
+  select(Pop_Size, Num_Iters, Experts, 
+         Alternatives, D_Experts, D_Consensus, Initialisation, Best_Dir) %>% 
+  distinct()
+
+Master_Configurations$ID <- 1:nrow(Master_Configurations)
+PSOs <- merge(PSOs, Master_Configurations, 
+               by = c("Pop_Size", "Num_Iters", "Experts", 
+         "Alternatives", "D_Experts", "D_Consensus", "Initialisation",
+         "Best_Dir"))
+
+#######
+
+Master_Problem_Type <- PSOs %>% 
+  select(Experts, Alternatives, D_Experts, D_Consensus) %>% 
+  distinct()
+
+Master_Problem_Type$ID_Type_P <- 1:nrow(Master_Problem_Type)
+
+PSOs <- merge(PSOs, Master_Problem_Type, 
+               by = c("Experts", "Alternatives", "D_Experts", "D_Consensus"))
+
+Gens <- merge(Gens, Master_Problem_Type,
+                by = c("Experts", "Alternatives", "D_Experts", "D_Consensus"))
+
+
+Master_PSO_Configuration_Type <- PSOs %>% 
+  select(Pop_Size, Num_Iters, Best_Dir, Initialisation) %>% 
+  distinct()
+
+Master_PSO_Configuration_Type$ID_Type_C <-
+      1:nrow(Master_PSO_Configuration_Type)
+
+Master_GA_Configuration_Type <- Gens %>% 
+  select(Pop_Size, Num_Iters, Initialisation, Selection, 
+         Crossover, Mutation, Replacement) %>% 
+  distinct()
+
+Master_GA_Configuration_Type$ID_Type_C <- 
+  nrow(Master_PSO_Configuration_Type)+(1:nrow(Master_GA_Configuration_Type))
+
+
+PSOs <- merge(PSOs, Master_PSO_Configuration_Type, 
+               by = c("Pop_Size", "Num_Iters", "Best_Dir", "Initialisation"))
+
+Gens <- merge(Gens, Master_GA_Configuration_Type, 
+               by = c("Pop_Size", "Num_Iters", "Initialisation", "Selection", 
+         "Crossover", "Mutation", "Replacement"))
+
+rm(Master_GA_Configuration_Type)
+rm(Master_PSO_Configuration_Type)
+rm(Master_Configurations)
+rm(Master_Problem_Type)
+```
+
+```{r}
+# Points to number
+
+for(i in 1:50){
+  PSOs[sprintf("Point_%s_Consensus",i)] <- pull(PSOs, sprintf("Point_%s",i)) %>% 
+    sapply(function(s){
+      if(is.na(s)){
+        NA
+      } else {
+        strsplit(s, ",")[[1]][1] %>% 
+          gsub('\\{"consensus":', "", .) %>% 
+          as.numeric()
+      }
+    })
+  
+  PSOs[sprintf("Point_%s_Distance",i)] <- pull(PSOs, sprintf("Point_%s", i)) %>% 
+    sapply(function(s){
+      if(is.na(s)){
+        NA
+      } else {
+        strsplit(s, ",")[[1]][2] %>% 
+          gsub('"distance":', "", .) %>% 
+          gsub("\\}", "", .) %>% 
+          as.numeric()
+      }
+    })
+}
+
+# Removing texts
+PSOs <- PSOs %>% select(-sprintf("Point_%s", 1:50))
+```
+
+```{r}
+# Points to number
+
+for(i in 1:50){
+  Gens[sprintf("Point_%s_Consensus",i)] <- pull(Gens, sprintf("Point_%s",i)) %>% 
+    sapply(function(s){
+      if(is.na(s)){
+        NA
+      } else {
+        strsplit(s, ",")[[1]][1] %>% 
+          gsub('\\{"consensus":', "", .) %>% 
+          as.numeric()
+      }
+    })
+  
+  Gens[sprintf("Point_%s_Distance",i)] <- pull(Gens, sprintf("Point_%s", i)) %>% 
+    sapply(function(s){
+      if(is.na(s)){
+        NA
+      } else {
+        strsplit(s, ",")[[1]][2] %>% 
+          gsub('"distance":', "", .) %>% 
+          gsub("\\}", "", .) %>% 
+          as.numeric()
+      }
+    })
+}
+
+# Removing texts
+Gens <- Gens %>% select(-sprintf("Point_%s", 1:50))
+```
+
+
+## Juntamos los dataframes
+
+```{r}
+# Dataframe joining: Problem type, ID_Configuration, HV and Epsilon
+
+PSO_Probs <- PSOs %>% 
+  select(Experts, Alternatives, D_Consensus, D_Experts, 
+         ID_Type_C, ID_Type_P, HV, Epsilon)
+
+GEN_Probs <- Gens %>% 
+  select(Experts, Alternatives, D_Consensus, D_Experts, 
+         ID_Type_C, ID_Type_P, HV, Epsilon)
+
+Problems <- union_all(PSO_Probs, GEN_Probs)
+```
+
+```{r}
+Problem_ID <- NULL
+P_Value <- NULL
+
+for(i in unique(Problems$ID_Type_P)){
+  
+  #print(sprintf("Fligner-Killen Test: Problem %s", i))
+  aux <- fligner.test(Epsilon ~ as.factor(ID_Type_C), 
+                     data = Problems %>% filter(ID_Type_P == i))
+  #print(aux)
+  
+  Problem_ID <- c(Problem_ID, i)
+  P_Value <- c(P_Value, aux$p.value)
+  
+}
+
+Result <- data.frame(Problem_ID, P_Value)
+
+```
+
+Due to the lack of homoscedasticity in HV, for each of the problems, conditioned by the configurations, we proceed to perform the Kruskal-Wallis test to compare statistical supremacy among the configurations for each problem.
+
+```{r}
+Problem_ID <- NULL
+P_Value <- NULL
+
+for(i in unique(Problems$ID_Type_P)){
+  
+  #print(sprintf("Kruskal-Wallis Test: Problem %s", i))
+  aux <- kruskal.test(Epsilon ~ as.factor(ID_Type_C), 
+                     data = Problems %>% filter(ID_Type_P == i))
+  #print(aux)
+  
+  Problem_ID <- c(Problem_ID, i)
+  P_Value <- c(P_Value, aux$p.value)
+  
+}
+
+Result_Kruskal_Eps <- data.frame(Problem_ID, P_Value)
+```
+
+KW test tells us there are differences for each of the problems conditioned by the configuration.
+
+```{r}
+Problem_ID <- NULL
+P_Value <- NULL
+
+pairwise_results <- list()
+
+for(i in unique(Problems$ID_Type_P)){
+  
+#  print(sprintf("Pairwise Wilcox Test: Problema %s", i))
+  aux <- pairwise.wilcox.test(
+    Problems %>% filter(ID_Type_P == i) %>% pull(HV), 
+    Problems %>% filter(ID_Type_P == i) %>% pull(ID_Type_C),
+    alternative = "greater",
+    exact = F)
+ # print(aux)
+  
+#  Problem_ID <- c(Problem_ID, i)
+#  P_Value <- c(P_Value, aux$p.value)
+   pairwise_results[[as.character(i)]] <- aux$p.value 
+ 
+}
+
+#Result_Wilcox_HV <- data.frame(Problem_ID, P_Value)
+
+
+
+all_ids <- unique(unlist(lapply(pairwise_results, colnames)))
+n <- length(all_ids)
+p_value_matrix <- matrix(NA, n, n, dimnames = list(all_ids, all_ids))
+
+
+valid_columns <- which(apply(pairwise_results[[1]], 2, function(col) all(is.na(col) | col >= 0.05)))
+print(valid_columns)
+print(pairwise_results[[3]][,1])
+for(i in names(pairwise_results)) {
+#  p_value_matrix[rownames(pairwise_results[[i]]), colnames(pairwise_results[[i]])] <- pairwise_results[[i]]
+valid_columns <- which(apply(pairwise_results[[i]], 2, function(col) all(is.na(col) | col >= 0.05)))
+}
+
+# Saving the index for these columns
+valid_columns <- which(apply(p_value_matrix, 2, function(col) all(is.na(col) | col >= 0.05)))
+
+# Saving the index for these rows
+valid_rows <- apply(p_value_matrix, 2, function(col) if(all(is.na(col) | col >= 0.05)) which.max(col) else NA)
+
+# Create a data.frame with the Results
+Result_indices <- data.frame(Column_Index = valid_columns, Row_Index = valid_rows[valid_columns])
+
+# Verify Results
+print(Result_indices)
+
+
+```
+
+```{r script_full_matrix}
+  # Script for the de Wilcox group test. Now only epsilon, change such value for HV for the other indicator
+  
+  ## Prototype matrix for the p-values
+  conf_type_aux <- unique(Problems$ID_Type_C)
+  matrix_aux <- matrix(0, ncol = length(conf_type_aux), nrow = length(conf_type_aux))
+  colnames(matrix_aux) <- conf_type_aux
+  rownames(matrix_aux) <- conf_type_aux
+  
+  ## We complete the matrix for each configuration
+  matrices_list <- unique(Problems$ID_Type_P) %>% lapply(function(p_type){
+    
+    aux <- Problems %>% filter(ID_Type_P == p_type)
+    
+    for(row in rownames(matrix_aux)){
+      
+      aux1 <- aux %>% filter(ID_Type_C == row) %>% pull(Epsilon)
+      
+      for(col in colnames(matrix_aux)){
+        
+        if(row == col){
+          
+          matrix_aux[row,col] <- 1
+          
+        } else {
+          
+          aux2 <- aux %>% filter(ID_Type_C == col) %>% pull(Epsilon)
+          matrix_aux[row,col] <- wilcox.test(aux1, aux2, alternative = "less", exact = F)$p.value
+          #less for epsilon, greater for HV
+        }
+      }
+    }
+    
+    return(matrix_aux)
+  })
+
+  
+```
+
+```{r}
+#Saving the matrices in files
+
+for (i in 1:256){
+  write.csv2(matrices_list[i],sprintf("files/Matrices/Epsilon/Epsilon_Exp%s.csv",i), row.names = FALSE)
+}
+```
+
+
+```{r}
+#Showing data in sunbursts (hardcoded)
+
+library(plotly)
+
+psos_hv <- c(246, 135, 33, 33, 28, 38)
+ga_hv <- c(10,11,16)
+conf_ids_hv <- c("HV", "PSO", "GA", "GOther", "G169", "G163", "P11", "P9", "P12", "P4", "P16", "POther")
+conf_labels_hv <- c("HV", "PSO", "GA", "Other", "G169", "G163", "P11", "P9", "P12", "P4", "P16", "Other")
+conf_parents_hv <- c("", "HV", "HV", "GA", "GA", "GA", "PSO", "PSO", "PSO", "PSO", "PSO", "PSO")
+
+psos_t_hv <- sum(psos_hv)
+ga_t_hv <- sum(ga_hv)
+
+total_hv <- psos_t_hv + ga_t_hv
+
+fig_hv <- plot_ly(
+  
+  ids = conf_ids_hv,
+  labels = conf_labels_hv,
+  parents = conf_parents_hv,
+  values = c(total_hv, psos_t_hv, ga_t_hv, ga_hv, psos_hv),
+  type = 'sunburst',
+  branchvalues = 'total',
+  sort = FALSE,
+  insidetextorientation='radial'
+)
+
+fig_hv <- fig_hv %>% 
+  layout(
+    sunburstcolorway = c("#3280ae","#8cb849"),
+          extendsunburstcolors = TRUE
+  )
+fig_hv
+
+hvs <- c(251, 141, 33, 33, 28, 38)
+conf_ids_hv <- c("HV", "P11", "P9", "P12", "P4", "P16", "POther")
+conf_labels_hv <- c("HV only PSOs", "P11", "P9", "P12", "P4", "P16", "Other")
+conf_parents_hv <- c("", "HV","HV","HV","HV","HV","HV")
+
+hv <- sum(hvs)
+
+fig_hv <- plot_ly(
+  
+  ids = conf_ids_hv,
+  labels = conf_labels_hv,
+  parents = conf_parents_hv,
+  values = c(hv, hvs),
+  type = 'sunburst',
+  branchvalues = 'total',
+  sort = FALSE,
+  insidetextorientation='radial'
+)
+
+fig_hv <- fig_hv %>% 
+  layout(
+    sunburstcolorway = c("#3280ae","#3280ae","#3280ae","#3280ae","#3280ae","#3280ae"),
+          extendsunburstcolors = TRUE
+  )
+fig_hv
+
+hvs <- c(236, 210, 41)
+conf_ids_hv <- c("HV","G169", "G163", "GOther")
+conf_labels_hv <- c("HV only GAs", "G169", "G163", "Other")
+conf_parents_hv <- c("", "HV", "HV","HV")
+
+hv <- sum(hvs)
+
+fig_hv <- plot_ly(
+  
+  ids = conf_ids_hv,
+  labels = conf_labels_hv,
+  parents = conf_parents_hv,
+  values = c(hv, hvs),
+  type = 'sunburst',
+  branchvalues = 'total',
+  sort = FALSE,
+  insidetextorientation='radial'
+)
+
+fig_hv <- fig_hv %>% 
+  layout(
+    sunburstcolorway = c("#8cb849","#8cb849","#8cb849"),
+          extendsunburstcolors = TRUE
+  )
+fig_hv
+
+
+
+
+
+psos_eps <- c(168, 139, 105, 62, 31, 34)
+ga_eps <- c(33,21,34,53)
+conf_ids_eps <- c("ϵ-Indicator", "PSO", "GA", "GOther", "G163", "G166", "G118", "P11", "P9", "P3", "P1", "P15", "POther")
+conf_labels_eps <- c("ϵ-Indicator", "PSO", "GA", "Other", "G163", "G166", "G118", "P11", "P9", "P3", "P1", "P15", "Other")
+conf_parents_eps <- c("", "ϵ-Indicator", "ϵ-Indicator", "GA", "GA", "GA", "GA", "PSO", "PSO", "PSO", "PSO", "PSO", "PSO")
+
+psos_t_eps <- sum(psos_eps)
+ga_t_eps <- sum(ga_eps)
+
+total_eps <- psos_t_eps + ga_t_eps
+
+fig_eps <- plot_ly(
+  
+  ids = conf_ids_eps,
+  labels = conf_labels_eps,
+  parents = conf_parents_eps,
+  values = c(total_eps, psos_t_eps, ga_t_eps, ga_eps, psos_eps),
+  type = 'sunburst',
+  branchvalues = 'total',
+  sort = FALSE,
+  insidetextorientation='radial'
+)
+
+fig_eps <- fig_eps %>% 
+  layout(
+    sunburstcolorway = c("#3280ae",rgb(233/255, 181/255, 69/255)),
+          extendsunburstcolors = TRUE
+  )
+fig_eps
+
+
+eps <- c(239, 214, 111, 67, 52, 52, 63)
+conf_ids_eps <- c("ϵ-Indicator", "P11", "P9", "P3", "P1", "P15", "P13", "POther")
+conf_labels_eps <- c("ϵ-Indicator only PSOs", "P11", "P9", "P3", "P1", "P15", "P13", "Other")
+conf_parents_eps <- c("", "ϵ-Indicator", "ϵ-Indicator", "ϵ-Indicator", "ϵ-Indicator", "ϵ-Indicator", "ϵ-Indicator", "ϵ-Indicator")
+
+ep <- sum(eps)
+
+fig_eps <- plot_ly(
+  
+  ids = conf_ids_eps,
+  labels = conf_labels_eps,
+  parents = conf_parents_eps,
+  values = c(ep, eps),
+  type = 'sunburst',
+  branchvalues = 'total',
+  sort = FALSE,
+  insidetextorientation='radial'
+)
+
+fig_eps <- fig_eps %>% 
+  layout(
+    sunburstcolorway = c("#3280ae","#3280ae","#3280ae","#3280ae","#3280ae","#3280ae","#3280ae"),
+          extendsunburstcolors = TRUE
+  )
+fig_eps
+
+eps <- c(117, 83, 67, 53, 34, 19)
+conf_ids_eps <- c("ϵ-Indicator", "G199", "G169", "G163", "G118", "G166", "GOther")
+conf_labels_eps <- c("ϵ-Indicator only GAs", "G199", "G169", "G163", "G118", "G166", "Other")
+conf_parents_eps <- c("", "ϵ-Indicator", "ϵ-Indicator", "ϵ-Indicator", "ϵ-Indicator", "ϵ-Indicator", "ϵ-Indicator")
+
+ep <- sum(eps)
+
+fig_eps <- plot_ly(
+  
+  ids = conf_ids_eps,
+  labels = conf_labels_eps,
+  parents = conf_parents_eps,
+  values = c(ep, eps),
+  type = 'sunburst',
+  branchvalues = 'total',
+  sort = FALSE,
+  insidetextorientation='radial'
+)
+
+fig_eps <- fig_eps %>% 
+  layout(
+    sunburstcolorway = c("#8cb849","#8cb849","#8cb849","#8cb849","#8cb849","#8cb849"),
+          extendsunburstcolors = TRUE
+  )
+fig_eps
+
+
+```
+
+```{r}
+#adjusting labels and positions to be prettier
+library(plotly)
+hvs <- c(251, 141, 33, 33, 28, 38)
+conf_ids_hv <- c("HV", "P11", "P9", "P12", "P4", "P16", "POther")
+conf_labels_hv <- c("HV only PSOs", "P11", "", "P12", "P4", "P16", "Other")
+conf_parents_hv <- c("", "HV","HV","HV","HV","HV","HV")
+
+hv <- sum(hvs)
+
+fig_hv <- plot_ly(
+  ids = conf_ids_hv,
+  labels = conf_labels_hv,
+  parents = conf_parents_hv,
+  values = c(hv, hvs),
+  type = 'sunburst',
+  branchvalues = 'total',
+  sort = FALSE,
+  insidetextorientation = 'radial',
+  margin = list(l = 0, r = 0, t = 0, b = 0)
+
+)
+
+fig_hv <- fig_hv %>% 
+  layout(
+    sunburstcolorway = c("#3280ae","#3280ae","#3280ae","#3280ae","#3280ae","#3280ae"),
+    extendsunburstcolors = TRUE,
+    annotations = list(
+      list(
+        x = 0.32,
+        y = 0.22,
+        text = "P9",
+        showarrow = FALSE,
+        font = list(size = 13, color = "white"),
+        textangle = -45
+      )
+    ),
+    margin = list(l = 0, r = 0, t = 0, b = 0)
+  )
+
+fig_hv
+```
+
+```{r}
+psos_hv <- c(246, 135, 33, 33, 28, 38)
+ga_hv <- c(10,11,16)
+conf_ids_hv <- c("HV", "PSO", "GA", "GOther", "G169", "G163", "P11", "P9", "P12", "P4", "P16", "POther")
+conf_labels_hv <- c("HV", "PSO", "GA", "Other", "G169", "G163", "P11", "", "P12", "P4", "P16", "Other")
+conf_parents_hv <- c("", "HV", "HV", "GA", "GA", "GA", "PSO", "PSO", "PSO", "PSO", "PSO", "PSO")
+
+psos_t_hv <- sum(psos_hv)
+ga_t_hv <- sum(ga_hv)
+
+total_hv <- psos_t_hv + ga_t_hv
+
+fig_hv <- plot_ly(
+  
+  ids = conf_ids_hv,
+  labels = conf_labels_hv,
+  parents = conf_parents_hv,
+  values = c(total_hv, psos_t_hv, ga_t_hv, ga_hv, psos_hv),
+  type = 'sunburst',
+  branchvalues = 'total',
+  sort = FALSE,
+  insidetextorientation='radial'
+)
+
+fig_hv <- fig_hv %>% 
+  layout(
+    sunburstcolorway = c("#3280ae","#8cb849"),
+      extendsunburstcolors = TRUE,
+      annotations = list(
+      list(
+        x = 0.265, 
+        y = 0.265, 
+        text = "P9", 
+        showarrow = FALSE,
+        font = list(size = 13, color = "white"),
+        textangle = -40 
+      )
+    ),
+    margin = list(l = 0, r = 0, t = 0, b = 0)
+  )
+fig_hv
+```
+
+```{r}
+hvs <- c(236, 210, 41)
+conf_ids_hv <- c("HV","G169", "G163", "GOther")
+conf_labels_hv <- c("HV only GAs", "G169", "", "Other")
+conf_parents_hv <- c("", "HV", "HV","HV")
+
+hv <- sum(hvs)
+
+fig_hv <- plot_ly(
+  
+  ids = conf_ids_hv,
+  labels = conf_labels_hv,
+  parents = conf_parents_hv,
+  values = c(hv, hvs),
+  type = 'sunburst',
+  branchvalues = 'total',
+  sort = FALSE,
+  insidetextorientation='radial'
+)
+
+fig_hv <- fig_hv %>% 
+  layout(
+    sunburstcolorway = c("#8cb849","#8cb849","#8cb849"),
+# amarillo: rgb(233/255, 181/255, 69/255)
+          extendsunburstcolors = TRUE,
+      annotations = list(
+      list(
+        x = 0.45,
+        y = 0.1,
+        text = "G163", 
+        showarrow = FALSE,
+        font = list(size = 12, color = "black"),
+        textangle = -80 
+      )
+    ),
+    margin = list(l = 0, r = 0, t = 0, b = 0)
+  )
+fig_hv
+```
+
+```{r}
+psos_eps <- c(168, 139, 105, 62, 31, 34)
+ga_eps <- c(33,21,34,53)
+conf_ids_eps <- c("ϵ-Indicator", "PSO", "GA", "GOther", "G163", "G166", "G118", "P11", "P9", "P3", "P1", "P15", "POther")
+conf_labels_eps <- c("ϵ-Indicator", "PSO", "GA", "Other", "G163", "G166", "G118", "P11", "P9", "", "P1", "P15", "Other")
+conf_parents_eps <- c("", "ϵ-Indicator", "ϵ-Indicator", "GA", "GA", "GA", "GA", "PSO", "PSO", "PSO", "PSO", "PSO", "PSO")
+
+psos_t_eps <- sum(psos_eps)
+ga_t_eps <- sum(ga_eps)
+
+total_eps <- psos_t_eps + ga_t_eps
+
+fig_eps <- plot_ly(
+  
+  ids = conf_ids_eps,
+  labels = conf_labels_eps,
+  parents = conf_parents_eps,
+  values = c(total_eps, psos_t_eps, ga_t_eps, ga_eps, psos_eps),
+  type = 'sunburst',
+  branchvalues = 'total',
+  sort = FALSE,
+  insidetextorientation='radial'
+)
+
+fig_eps <- fig_eps %>% 
+  layout(
+    sunburstcolorway = c("#3280ae","#8cb849"),
+          extendsunburstcolors = TRUE,
+      annotations = list(
+      list(
+        x = 0.23,
+        y = 0.42,
+        text = "P3", 
+        showarrow = FALSE,
+        font = list(size = 12, color = "white"),
+        textangle = -15 
+      )
+    ),
+    margin = list(l = 0, r = 0, t = 0, b = 0)
+  )
+fig_eps
+```
+
+```{r}
+
+
+eps <- c(239, 214, 111, 67, 52, 52, 63)
+conf_ids_eps <- c("ϵ-Indicator", "P11", "P9", "P3", "P1", "P15", "P13", "POther")
+conf_labels_eps <- c("ϵ-Indicator only PSOs", "P11", "", "P3", "P1", "P15", "P13", "Other")
+conf_parents_eps <- c("", "ϵ-Indicator", "ϵ-Indicator", "ϵ-Indicator", "ϵ-Indicator", "ϵ-Indicator", "ϵ-Indicator", "ϵ-Indicator")
+
+ep <- sum(eps)
+
+fig_eps <- plot_ly(
+  
+  ids = conf_ids_eps,
+  labels = conf_labels_eps,
+  parents = conf_parents_eps,
+  values = c(ep, eps),
+  type = 'sunburst',
+  branchvalues = 'total',
+  sort = FALSE,
+  insidetextorientation='radial'
+)
+
+fig_eps <- fig_eps %>% 
+  layout(
+    sunburstcolorway = c("#3280ae","#3280ae","#3280ae","#3280ae","#3280ae","#3280ae","#3280ae"),
+          extendsunburstcolors = TRUE,
+      annotations = list(
+      list(
+        x = 0.27,
+        y = 0.62,
+        text = "P9", 
+        showarrow = FALSE,
+        font = list(size = 12, color = "WHITE"),
+        textangle = 25 
+      )
+    ),
+    margin = list(l = 0, r = 0, t = 0, b = 0)
+  )
+fig_eps
+```
+
+```{r}
+
+eps <- c(117, 83, 67, 53, 34, 19)
+conf_ids_eps <- c("ϵ-Indicator", "G199", "G169", "G163", "G118", "G166", "GOther")
+conf_labels_eps <- c("ϵ-Indicator only GAs", "G199", "", "G163", "G118", "G166", "Other")
+conf_parents_eps <- c("", "ϵ-Indicator", "ϵ-Indicator", "ϵ-Indicator", "ϵ-Indicator", "ϵ-Indicator", "ϵ-Indicator")
+
+ep <- sum(eps)
+
+fig_eps <- plot_ly(
+  
+  ids = conf_ids_eps,
+  labels = conf_labels_eps,
+  parents = conf_parents_eps,
+  values = c(ep, eps),
+  type = 'sunburst',
+  branchvalues = 'total',
+  sort = FALSE,
+  insidetextorientation='radial'
+)
+
+fig_eps <- fig_eps %>% 
+  layout(
+    sunburstcolorway = c("#8cb849","#8cb849","#8cb849","#8cb849","#8cb849","#8cb849"),
+          extendsunburstcolors = TRUE,
+      annotations = list(
+      list(
+        x = 0.26,
+        y = 0.7,
+        text = "G169", 
+        showarrow = FALSE,
+        font = list(size = 12, color = "black"),
+        textangle = 30 
+      )
+    ),
+    margin = list(l = 0, r = 0, t = 0, b = 0)
+  )
+fig_eps
+```
